@@ -113,6 +113,18 @@ async fn readonly_slow_existence_matches_both_readable_tiers() -> Result<(), Err
         assert_eq!(view.get_part_unchunked(hot, 0, None).await?, b"hot"[..]);
         assert_eq!(view.get_part_unchunked(cold, 0, None).await?, b"cold"[..]);
         assert_eq!(slow.has(hot).await?, None);
+        view.update_oneshot(absent, Bytes::from_static(b"local"))
+            .await?;
+        assert_eq!(slow.has(absent).await?, None);
+        assert_eq!(
+            fast.has(absent).await?,
+            if fast_direction == StoreDirection::ReadOnly {
+                None
+            } else {
+                Some(5)
+            }
+        );
+        assert_eq!(view.has(absent).await?, fast.has(absent).await?);
     }
     // Writable mirrors must still demand refilling their durable tier.
     let (writer, fast, _) = make_stores();
