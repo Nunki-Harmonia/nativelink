@@ -366,10 +366,25 @@ impl GrpcStore {
         self.retrier
             .retry(unfold(input, move |input| async move {
                 let input_clone = input.clone();
-                Some((
-                    request(input_clone)
+                // Connection acquisition may wait while the manager reconnects
+                // indefinitely. Include it in the configured request deadline,
+                // just as the streaming write path does.
+                let operation = request(input_clone);
+                let result = if self.rpc_timeout.is_zero() {
+                    operation.await
+                } else {
+                    tokio::time::timeout(self.rpc_timeout, operation)
                         .await
-                        .map_or_else(RetryResult::Retry, RetryResult::Ok),
+                        .unwrap_or_else(|_| {
+                            Err(make_err!(
+                                Code::DeadlineExceeded,
+                                "GrpcStore request exceeded {} second deadline",
+                                self.rpc_timeout.as_secs()
+                            ))
+                        })
+                };
+                Some((
+                    result.map_or_else(RetryResult::Retry, RetryResult::Ok),
                     input,
                 ))
             }))

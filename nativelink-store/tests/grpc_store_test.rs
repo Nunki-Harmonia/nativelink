@@ -43,6 +43,58 @@ use tracing::info;
 const VALID_HASH: &str = "0123456789abcdef000000000000000000010000000000000123456789abcdef";
 const RAW_INPUT: &str = "123";
 
+#[nativelink_test]
+async fn unavailable_upstream_obeys_read_rpc_deadline() -> Result<(), Error> {
+    use nativelink_error::Code;
+    use nativelink_proto::build::bazel::remote::execution::v2::GetActionResultRequest;
+    // Hold the port without serving: TCP may connect, but no gRPC response
+    // can arrive. The deadline must cover connection acquisition as well.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut spec = test_spec(format!("http://{}", listener.local_addr().unwrap()), false);
+    spec.retry.max_retries = 0;
+    let digest = Digest {
+        hash: VALID_HASH.into(),
+        size_bytes: 3,
+    };
+    let cas = GrpcStore::new(&spec).await?;
+    let missing = timeout(
+        Duration::from_secs(3),
+        cas.find_missing_blobs(Request::new(FindMissingBlobsRequest {
+            blob_digests: vec![digest.clone()],
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect("CAS lookup ignored its configured deadline")
+    .unwrap_err();
+    assert_eq!(missing.code, Code::DeadlineExceeded);
+    let read = timeout(
+        Duration::from_secs(3),
+        cas.batch_read_blobs(Request::new(BatchReadBlobsRequest {
+            digests: vec![digest.clone()],
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect("CAS read ignored its configured deadline")
+    .unwrap_err();
+    assert_eq!(read.code, Code::DeadlineExceeded);
+    spec.store_type = StoreType::Ac;
+    let ac = GrpcStore::new(&spec).await?;
+    let lookup = timeout(
+        Duration::from_secs(3),
+        ac.get_action_result(Request::new(GetActionResultRequest {
+            action_digest: Some(digest),
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect("AC lookup ignored its configured deadline")
+    .unwrap_err();
+    assert_eq!(lookup.code, Code::DeadlineExceeded);
+    Ok(())
+}
+
 fn test_spec<T: Into<String>>(endpoint: T, use_legacy_resource_names: bool) -> GrpcSpec {
     GrpcSpec {
         instance_name: String::new(),
