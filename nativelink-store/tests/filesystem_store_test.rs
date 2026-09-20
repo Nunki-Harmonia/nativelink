@@ -2005,6 +2005,50 @@ async fn detect_duplicate_upload_different_size() -> Result<(), Error> {
     Ok(())
 }
 
+#[nativelink_test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_same_digest_uploads_publish_once() -> Result<(), Error> {
+    const WRITERS: usize = 32;
+    const ROUNDS: usize = 32;
+
+    let content_path = make_temp_path("content_path");
+    let temp_path = make_temp_path("temp_path");
+    let store = Arc::new(
+        FilesystemStore::<FileEntryImpl>::new(&FilesystemSpec {
+            content_path,
+            temp_path,
+            ..Default::default()
+        })
+        .await?,
+    );
+    let digest = DigestInfo::try_new(HASH1, VALUE1.len())?;
+
+    for round in 0..ROUNDS {
+        let start = Arc::new(Barrier::new(WRITERS));
+        let writers = (0..WRITERS).map(|_| {
+            let store = Arc::clone(&store);
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                store.update_oneshot(digest, VALUE1.into()).await
+            })
+        });
+
+        for result in futures::future::join_all(writers).await {
+            result
+                .map_err(|err| make_err!(Code::Internal, "writer join failed: {err:?}"))?
+                .err_tip(|| format!("same-digest writer failed in round {round}"))?;
+        }
+
+        assert_eq!(
+            store.get_part_unchunked(digest, 0, None).await?.as_ref(),
+            VALUE1.as_bytes(),
+            "canonical blob changed after round {round}"
+        );
+    }
+
+    Ok(())
+}
+
 #[nativelink_test]
 async fn detect_duplicate_upload() -> Result<(), Error> {
     let (digest, store) = setup_store_for_duplicates().await?;

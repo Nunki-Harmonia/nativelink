@@ -11,6 +11,7 @@ exports_files(
 
 rust_binary(
     name = "nativelink",
+    version = "1.7.1",
     srcs = [
         "src/bin/nativelink.rs",
     ],
